@@ -6,54 +6,47 @@ using System;
 using UnityEditor;
 
 public class InfiniteMap : AbstractMap {
-	private Dictionary<Vector3i, Slot> slots;
+	private Dictionary<Vector3Int, Slot> slots;
 
 	public readonly int Height;
 
-	public Vector3i rangeLimitCenter;
-	public int rangeLimit = 80;
+	public Vector3Int rangeLimitCenter;
+	public int RangeLimit = 80;
 
 	private TilingMap defaultColumn;
 
 	public InfiniteMap(int height) : base() {
 		this.Height = height;
-		this.slots = new Dictionary<Vector3i, Slot>();
+		this.slots = new Dictionary<Vector3Int, Slot>();
+		this.defaultColumn = new TilingMap(new Vector3Int(1, height, 1));
 
-		if (Module.All == null || Module.All.Length == 0) {
+		if (ModuleData.Current == null || ModuleData.Current.Length == 0) {
 			throw new InvalidOperationException("Module data was not available, please create module data first.");
 		}
 	}
 
-	public override Slot GetSlot(Vector3i position, bool create) {
-		if (position.Y >= this.Height || position.Y < 0) {
+	public override Slot GetSlot(Vector3Int position) {
+		if (position.y >= this.Height || position.y < 0) {
 			return null;
 		}
 
 		if (this.slots.ContainsKey(position)) {
 			return this.slots[position];
 		}
-		if (!create) {
+
+		if (this.IsOutsideOfRangeLimit(position)) {
 			return null;
 		}
 
-		if ((position - this.rangeLimitCenter).Magnitude > this.rangeLimit) {
-#if UNITY_EDITOR
-			Debug.LogWarning("Touched Range Limit!");
-#endif
-			return null;
-		}
-
-		if (this.defaultColumn != null) {
-			this.slots[position] = new Slot(position, this, this.defaultColumn.GetSlot(position));
-		} else {
-			this.slots[position] = new Slot(position, this, true);
-		}
+		this.slots[position] = new Slot(position, this, this.defaultColumn.GetSlot(position));
 		return this.slots[position];
 	}
 
-	public override void ApplyBoundaryConstraints(IEnumerable<BoundaryConstraint> constraints) {
-		this.defaultColumn = new TilingMap(new Vector3i(1, this.Height, 1));
+	public bool IsOutsideOfRangeLimit(Vector3Int position) {
+		return (position - this.rangeLimitCenter).magnitude > this.RangeLimit;
+	}
 
+	public override void ApplyBoundaryConstraints(IEnumerable<BoundaryConstraint> constraints) {
 		foreach (var constraint in constraints) {
 			int y = constraint.RelativeY;
 			if (y < 0) {
@@ -72,10 +65,10 @@ public class InfiniteMap : AbstractMap {
 			foreach (int d in directions) {
 				switch (constraint.Mode) {
 					case BoundaryConstraint.ConstraintMode.EnforceConnector:
-						this.defaultColumn.GetSlot(new Vector3i(0, y, 0)).EnforceConnector(d, constraint.Connector);
+						this.defaultColumn.GetSlot(new Vector3Int(0, y, 0)).EnforceConnector(d, constraint.Connector);
 						break;
 					case BoundaryConstraint.ConstraintMode.ExcludeConnector:
-						this.defaultColumn.GetSlot(new Vector3i(0, y, 0)).ExcludeConnector(d, constraint.Connector);
+						this.defaultColumn.GetSlot(new Vector3Int(0, y, 0)).ExcludeConnector(d, constraint.Connector);
 						break;
 				}
 			}			
@@ -88,5 +81,25 @@ public class InfiniteMap : AbstractMap {
 
 	public override IEnumerable<Slot> GetAllSlots() {
 		return this.slots.Values;
+	}
+
+	public Slot GetDefaultSlot(int y) {
+		return this.defaultColumn.GetSlot(Vector3Int.up * y);
+	}
+	
+	public bool IsSlotInitialized(Vector3Int position) {
+		return this.slots.ContainsKey(position);
+	}
+
+	private bool muteRangeLimitWarning = false;
+
+	public void OnHitRangeLimit(Vector3Int position, ModuleSet modulesToRemove) {
+		if (this.muteRangeLimitWarning || position.y < 0 || position.y >= this.Height) {
+			return;
+		}
+
+		var prototypeNames = modulesToRemove.Select(module => module.Prototype.name).Distinct();
+		Debug.LogWarning("Hit range limit at " + position + ". Module(s) to be removed:\n" + string.Join("\n", prototypeNames.ToArray()) + "\n");
+		this.muteRangeLimitWarning = true;
 	}
 }

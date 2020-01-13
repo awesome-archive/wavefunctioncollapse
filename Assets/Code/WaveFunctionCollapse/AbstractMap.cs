@@ -12,7 +12,7 @@ public abstract class AbstractMap {
 	public static System.Random Random;
 
 	public readonly RingBuffer<HistoryItem> History;
-	public readonly QueueDictionary<Vector3i, ModuleSet> RemovalQueue;
+	public readonly QueueDictionary<Vector3Int, ModuleSet> RemovalQueue;
 	private HashSet<Slot> workArea;
 	public readonly Queue<Slot> BuildQueue;
 
@@ -26,19 +26,15 @@ public abstract class AbstractMap {
 
 		this.History = new RingBuffer<HistoryItem>(AbstractMap.HISTORY_SIZE);
 		this.History.OnOverflow = item => item.Slot.Forget();
-		this.RemovalQueue = new QueueDictionary<Vector3i, ModuleSet>(() => new ModuleSet());
+		this.RemovalQueue = new QueueDictionary<Vector3Int, ModuleSet>(() => new ModuleSet());
 		this.BuildQueue = new Queue<Slot>();
 
-		this.InitialModuleHealth = this.createInitialModuleHealth(Module.All);
+		this.InitialModuleHealth = this.createInitialModuleHealth(ModuleData.Current);
 
 		this.backtrackBarrier = 0;
 	}
 
-	public abstract Slot GetSlot(Vector3i position, bool create);
-	
-	public Slot GetSlot(Vector3i position) {
-		return this.GetSlot(position, true);
-	}
+	public abstract Slot GetSlot(Vector3Int position);
 
 	public abstract IEnumerable<Slot> GetAllSlots();
 
@@ -55,7 +51,7 @@ public abstract class AbstractMap {
 		if (this.workArea != null) {
 			this.workArea.Add(slot);
 		}
-	}	
+	}
 	
 	public void FinishRemovalQueue() {
 		while (this.RemovalQueue.Any()) {
@@ -67,75 +63,84 @@ public abstract class AbstractMap {
 		}
 	}
 
-	public void EnforceWalkway(Vector3i start, int direction) {
+	public void EnforceWalkway(Vector3Int start, int direction) {
 		var slot = this.GetSlot(start);
 		var toRemove = slot.Modules.Where(module => !module.GetFace(direction).Walkable);
 		slot.RemoveModules(ModuleSet.FromEnumerable(toRemove));
 	}
 
-	public void EnforceWalkway(Vector3i start, Vector3i destination) {
-		int direction = Orientations.GetIndex((destination - start).ToVector3());
+	public void EnforceWalkway(Vector3Int start, Vector3Int destination) {
+		int direction = Orientations.GetIndex((Vector3)(destination - start));
 		this.EnforceWalkway(start, direction);
 		this.EnforceWalkway(destination, (direction + 3) % 6);
 	}
 
-	public void Collapse(IEnumerable<Vector3i> targets, bool showProgress = false) {
-		Slot.ResetIterationCount();
-		this.RemovalQueue.Clear();
-		this.workArea = new HashSet<Slot>(targets.Select(target => this.GetSlot(target)).Where(slot => slot != null && !slot.Collapsed));
+	public void Collapse(IEnumerable<Vector3Int> targets, bool showProgress = false) {
+#if UNITY_EDITOR
+		try {
+#endif
+			this.RemovalQueue.Clear();
+			this.workArea = new HashSet<Slot>(targets.Select(target => this.GetSlot(target)).Where(slot => slot != null && !slot.Collapsed));
 
-		while (this.workArea.Any()) {
-			float minEntropy = float.PositiveInfinity;
-			Slot selected = null;
+			while (this.workArea.Any()) {
+				float minEntropy = float.PositiveInfinity;
+				Slot selected = null;
 
-			foreach (var slot in workArea) {
-				float entropy = slot.Modules.Entropy;
-				if (entropy < minEntropy) {
-					selected = slot;
-					minEntropy = entropy;
+				foreach (var slot in workArea) {
+					float entropy = slot.Modules.Entropy;
+					if (entropy < minEntropy) {
+						selected = slot;
+						minEntropy = entropy;
+					}
 				}
-			}
-			try {
-				selected.CollapseRandom();
-			}
-			catch (CollapseFailedException) {
-				this.RemovalQueue.Clear();
-				if (this.History.TotalCount > this.backtrackBarrier) {
-					this.backtrackBarrier = this.History.TotalCount;
-					this.backtrackAmount = 2;
-				} else {
-					this.backtrackAmount *= 2;
+				try {
+					selected.CollapseRandom();
 				}
-				if (this.backtrackAmount > 10) {
-					Debug.Log("Backtracking " + this.backtrackAmount + " steps...");
+				catch (CollapseFailedException) {
+					this.RemovalQueue.Clear();
+					if (this.History.TotalCount > this.backtrackBarrier) {
+						this.backtrackBarrier = this.History.TotalCount;
+						this.backtrackAmount = 2;
+					} else {
+						this.backtrackAmount += 4;
+					}
+					if (this.backtrackAmount > 0) {
+						Debug.Log(this.History.Count + " Backtracking " + this.backtrackAmount + " steps...");
+					}
+					this.Undo(this.backtrackAmount);
 				}
-				this.Undo(this.backtrackAmount);
+
+#if UNITY_EDITOR
+				if (showProgress && this.workArea.Count % 20 == 0) {
+					if (EditorUtility.DisplayCancelableProgressBar("Collapsing area... ", this.workArea.Count + " left...", 1f - (float)this.workArea.Count() / targets.Count())) {
+						EditorUtility.ClearProgressBar();
+						throw new Exception("Map generation cancelled.");
+					}
+				}
+#endif
 			}
 
 #if UNITY_EDITOR
 			if (showProgress) {
-				if (EditorUtility.DisplayCancelableProgressBar("Collapsing area... ", this.workArea.Count + " left...", 1f - (float)this.workArea.Count() / targets.Count())) {
-					EditorUtility.ClearProgressBar();
-					throw new Exception("Map generation cancelled.");
-				}
+				EditorUtility.ClearProgressBar();
 			}
-#endif
+			Debug.Log("Collapsed " + targets.Count() + " slots.");
 		}
-
-#if UNITY_EDITOR
-		if (showProgress) {
-			EditorUtility.ClearProgressBar();
+		catch (Exception e) {
+			if (showProgress) {
+				EditorUtility.ClearProgressBar();
+				throw e;
+			}
 		}
-		Debug.Log("Collapsed " + targets.Count() + " slots in " + Slot.GetIterationCount() + " iterations (" + (float)Slot.GetIterationCount() / targets.Count() + " iterations per slot)");
 #endif
 	}
 
-	public void Collapse(Vector3i start, Vector3i size, bool showProgress = false) {
-		var targets = new List<Vector3i>();
-		for (int x = 0; x < size.X; x++) {
-			for (int y = 0; y < size.Y; y++) {
-				for (int z = 0; z < size.Z; z++) {
-					targets.Add(start + new Vector3i(x, y, z));
+	public void Collapse(Vector3Int start, Vector3Int size, bool showProgress = false) {
+		var targets = new List<Vector3Int>();
+		for (int x = 0; x < size.x; x++) {
+			for (int y = 0; y < size.y; y++) {
+				for (int z = 0; z < size.z; z++) {
+					targets.Add(start + new Vector3Int(x, y, z));
 				}
 			}
 		}
@@ -149,7 +154,13 @@ public abstract class AbstractMap {
 			foreach (var slotAddress in item.RemovedModules.Keys) {
 				this.GetSlot(slotAddress).AddModules(item.RemovedModules[slotAddress]);
 			}
+
+			item.Slot.Module = null;
+			this.NotifySlotCollapseUndone(item.Slot);
 			steps--;
+		}
+		if (this.History.Count == 0) {
+			this.backtrackBarrier = 0;
 		}
 	}
 
@@ -167,7 +178,7 @@ public abstract class AbstractMap {
 		for (int i = 0; i < modules.Length; i++) {
 			for (int d = 0; d < 6; d++) {
 				if (initialModuleHealth[d][i] == 0) {
-					Debug.LogError("Module " + modules[i].Name + " cannot be reached from direction " + d + " (" + modules[i].GetFace(d).ToString() + ")!", modules[i].Prototype.gameObject);
+					Debug.LogError("Module " + modules[i].Name + " cannot be reached from direction " + d + " (" + modules[i].GetFace(d).ToString() + ")!", modules[i].Prefab);
 					throw new Exception("Unreachable module.");
 				}
 			}
